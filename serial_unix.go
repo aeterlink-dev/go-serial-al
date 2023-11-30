@@ -9,6 +9,7 @@
 package serial
 
 import (
+	"fmt"
 	"io/ioutil"
 	"regexp"
 	"strings"
@@ -27,6 +28,21 @@ type unixPort struct {
 	closeLock   sync.RWMutex
 	closeSignal *unixutils.Pipe
 	opened      uint32
+}
+
+const (
+	rs485Enabled      = 1 << 0
+	rs485RTSOnSend    = 1 << 1
+	rs485RTSAfterSend = 1 << 2
+	rs485RXDuringTX   = 1 << 4
+)
+
+// rs485_ioctl_opts is used to configure RS485 options in the driver
+type rs485IoctlOpts struct {
+	flags              int
+	delayRtsBeforeSend int
+	delayRtsAfterSend  int
+	padding            [5]int
 }
 
 func (port *unixPort) Close() error {
@@ -277,6 +293,12 @@ func nativeOpen(portName string, mode *Mode) (*unixPort, error) {
 
 	port.acquireExclusiveAccess()
 
+	// Enable RS485, if requested
+	if err = port.enableRS485(&mode.RS485); err != nil {
+		port.Close()
+		return nil, err
+	}
+
 	// This pipe is used as a signal to cancel blocking Read
 	pipe := &unixutils.Pipe{}
 	if err := pipe.Open(); err != nil {
@@ -466,4 +488,33 @@ func (port *unixPort) acquireExclusiveAccess() error {
 
 func (port *unixPort) releaseExclusiveAccess() error {
 	return unix.IoctlSetInt(port.handle, unix.TIOCNXCL, 0)
+}
+
+// enableRS485 enables RS485 functionality of driver via an ioctl if the config says so
+func (port *unixPort) enableRS485(config *RS485Config) error {
+	fmt.Println("Enable RS485")
+
+	if !config.Enabled {
+		return nil
+	}
+	rs485 := rs485IoctlOpts{
+		rs485Enabled,
+		int(config.DelayRtsBeforeSend / time.Millisecond),
+		int(config.DelayRtsAfterSend / time.Millisecond),
+		[5]int{0, 0, 0, 0, 0},
+	}
+
+	if config.RtsHighDuringSend {
+		rs485.flags |= rs485RTSOnSend
+	}
+	if config.RtsHighAfterSend {
+		rs485.flags |= rs485RTSAfterSend
+	}
+	if config.RxDuringTx {
+		rs485.flags |= rs485RXDuringTX
+	}
+
+	// return ioctl(port.handle, unix.TIOCSRS485, uintptr(unsafe.Pointer(&rs485)))
+	err := unix.IoctlSetPointerInt(port.handle, unix.TIOCSRS485, rs485.flags)
+	return err
 }
